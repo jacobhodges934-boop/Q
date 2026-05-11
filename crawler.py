@@ -1,5 +1,5 @@
 """
-携程旅游产品爬虫核心逻辑
+携程旅游产品爬虫核心逻辑 - 适配度假村产品列表
 """
 
 import time
@@ -9,11 +9,12 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import requests
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from urllib.parse import quote
 import logging
 import re
 
@@ -26,9 +27,10 @@ logger = logging.getLogger(__name__)
 
 
 class CtripTourCrawler:
-    def __init__(self, destination="武汉", output_file="tours.xlsx"):
+    def __init__(self, destination="武汉", output_file="tours_wuhan.xlsx", base_url=None):
         self.destination = destination
         self.output_file = output_file
+        self.base_url = base_url or "https://vacations.ctrip.com/list/whole/sc477.html"
         self.driver = self._init_driver()
         self.tours = []
         self.session = requests.Session()
@@ -47,13 +49,16 @@ class CtripTourCrawler:
         options.add_experimental_option('useAutomationExtension', False)
         
         try:
-            driver = webdriver.Chrome(options=options)
+            # 使用 webdriver-manager 自动管理 ChromeDriver
+            driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()),
+                options=options
+            )
             driver.set_page_load_timeout(30)
             logger.info("✅ Chrome 浏览器已启动")
             return driver
         except Exception as e:
             logger.error(f"❌ 启动 Chrome 失败: {str(e)}")
-            logger.info("请确保已安装 Chrome 浏览器和 ChromeDriver")
             raise
     
     @staticmethod
@@ -63,15 +68,12 @@ class CtripTourCrawler:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
         ]
         return {
             "User-Agent": random.choice(user_agents),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Accept-Encoding": "gzip, deflate",
-            "DNT": "1",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
             "Referer": "https://www.ctrip.com/",
@@ -86,8 +88,8 @@ class CtripTourCrawler:
         """爬取所有旅游产品"""
         tours = []
         page = 1
-        max_pages = 100  # 防止无限循环
-        consecutive_empty = 0  # 连续空页数
+        max_pages = 50  # 最多爬取50页
+        consecutive_empty = 0
         
         while page <= max_pages:
             logger.info(f"正在爬取第 {page} 页...")
@@ -99,17 +101,16 @@ class CtripTourCrawler:
                     consecutive_empty += 1
                     logger.warning(f"第 {page} 页没有产品 (连续空页: {consecutive_empty})")
                     
-                    # 如果连续3页都没有产品，则停止
-                    if consecutive_empty >= 3:
-                        logger.info("连续3页未找到产品，停止爬取")
+                    if consecutive_empty >= 2:
+                        logger.info("连续2页未找到产品，停止爬取")
                         break
                 else:
-                    consecutive_empty = 0  # 重置计数
+                    consecutive_empty = 0
                     tours.extend(page_tours)
                     logger.info(f"第 {page} 页爬取了 {len(page_tours)} 个产品，累计 {len(tours)} 个")
                 
                 page += 1
-                self._random_delay(2, 5)  # 页面间延迟
+                self._random_delay(2, 5)
                 
             except Exception as e:
                 logger.error(f"爬取第 {page} 页时出错: {str(e)}")
@@ -122,62 +123,72 @@ class CtripTourCrawler:
     def _crawl_page(self, page):
         """爬取单个页面"""
         try:
-            # 构造 URL - 携程跟团游产品搜索页
-            url = "https://you.ctrip.com/tours/search/vacations"
+            # 构造 URL 带分页参数
+            if page == 1:
+                url = self.base_url
+            else:
+                # 添加分页参数
+                separator = "&" if "?" in self.base_url else "?"
+                url = f"{self.base_url}{separator}pageindex={page}"
             
-            # 参数
-            params = {
-                "startingcityid": "2",  # 出发地参数
-                "keyword": self.destination,  # 目的地关键词
-                "page": page,
-            }
-            
-            # 拼接完整 URL
-            query_string = "&".join([f"{k}={quote(str(v))}" for k, v in params.items()])
-            full_url = f"{url}?{query_string}"
-            
-            logger.info(f"访问 URL: {full_url}")
+            logger.info(f"访问 URL: {url}")
             
             # 使用 Selenium 加载页面
-            self.driver.get(full_url)
+            self.driver.get(url)
             
             # 等待产品列表加载
             wait = WebDriverWait(self.driver, 15)
             try:
-                # 等待产品容器加载
-                wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "[class*='tour-item'], [class*='item-tour'], li[data-itemid]")))
+                # 等待产品容器加载 - 尝试多个选择器
+                wait.until(EC.presence_of_all_elements_located(
+                    (By.CSS_SELECTOR, "[class*='product'], [class*='item'], li[data-id], .list-item")
+                ))
                 logger.info("页面产品已加载")
             except:
-                logger.warning("页面加载超时或找不到产品元素")
+                logger.warning("页面加载超时")
             
-            self._random_delay(1, 2)
+            self._random_delay(1, 3)
             
             # 获取页面源码
             html = self.driver.page_source
             soup = BeautifulSoup(html, 'html.parser')
             
-            # 查找产品容器 - 尝试多种可能的选择器
+            # 查找产品容器 - 根据实际页面结构调整
             tour_items = []
+            
+            # 尝试多种可能的选择器
             selectors = [
-                soup.find_all('li', class_=lambda x: x and 'item-tour' in x),
-                soup.find_all('div', class_=lambda x: x and 'tour-item' in x),
-                soup.find_all('li', attrs={'data-itemid': True}),
-                soup.find_all('a', class_=lambda x: x and 'tour-link' in x),
+                ('ul.vac-list li', 'list item selector'),
+                ('div[class*="product-item"]', 'product-item class'),
+                ('div[class*="vacation-item"]', 'vacation-item class'),
+                ('li[data-id]', 'data-id attribute'),
+                ('div[class*="item-box"]', 'item-box class'),
             ]
             
-            for selector_result in selectors:
-                if selector_result:
-                    tour_items = selector_result
-                    break
+            for selector, desc in selectors:
+                try:
+                    elements = soup.select(selector)
+                    if elements:
+                        tour_items = elements
+                        logger.info(f"找到产品容器 ({desc}): {len(elements)} 个")
+                        break
+                except:
+                    continue
             
-            logger.info(f"找到 {len(tour_items)} 个产品")
+            if not tour_items:
+                logger.warning("未找到任何产品元素，尝试通过 HTML 结构查找...")
+                # 最后的尝试 - 查找所有包含特定文本的元素
+                tour_items = soup.find_all(['li', 'div'], attrs={'class': lambda x: x and any(
+                    key in str(x).lower() for key in ['item', 'product', 'vacation', 'list']
+                )})
+            
+            logger.info(f"找到 {len(tour_items)} 个产品元素")
             
             if len(tour_items) == 0:
-                logger.warning("未找到任何产品元素，可能需要调整选择器")
                 return []
             
             page_tours = []
-            for idx, item in enumerate(tour_items, 1):
+            for idx, item in enumerate(tour_items[:50], 1):  # 限制每页最多50个产品
                 try:
                     tour = self._parse_tour_item(item)
                     if tour and self._is_valid_tour(tour):
@@ -199,91 +210,91 @@ class CtripTourCrawler:
         try:
             tour = {}
             
-            # 产品名称 - 尝试多种方式获取
-            name_elem = None
-            for selector in [
-                item.find('h3'),
-                item.find('p', class_=lambda x: x and 'name' in x),
-                item.find('a', class_=lambda x: x and 'title' in x),
-                item.find('span', class_=lambda x: x and 'title' in x),
-            ]:
-                if selector:
-                    name_elem = selector
-                    break
-            
-            tour['产品名称'] = name_elem.text.strip() if name_elem else 'N/A'
+            # 产品名称 - 尝试多种方式
+            name = 'N/A'
+            for selector in ['h3', 'h2', 'a[title]', '[class*="title"]', '[class*="name"]']:
+                try:
+                    elem = item.select_one(selector)
+                    if elem:
+                        name = elem.get_text(strip=True)[:100]  # 限制长度
+                        break
+                except:
+                    continue
+            tour['产品名称'] = name
             
             # 产品 URL
-            link_elem = item.find('a', href=True)
-            if link_elem:
-                href = link_elem.get('href', '')
-                tour['产品链接'] = href if href.startswith('http') else f"https://you.ctrip.com{href}"
-            else:
-                tour['产品链接'] = 'N/A'
+            link = 'N/A'
+            try:
+                link_elem = item.find('a', href=True)
+                if link_elem:
+                    href = link_elem.get('href', '')
+                    if href:
+                        link = href if href.startswith('http') else f"https://vacations.ctrip.com{href}"
+            except:
+                pass
+            tour['产品链接'] = link
             
-            # 价格 - 尝试多种方式
+            # 价格
             price = 'N/A'
             for price_selector in [
-                item.find('span', class_=lambda x: x and 'price' in x),
-                item.find('em', class_=lambda x: x and 'price' in x),
-                item.find('i', class_=lambda x: x and 'rmb' in x),
+                '[class*="price"]', '[class*="rmb"]', '[class*="cost"]', 
+                'span[class*="money"]', 'em[class*="price"]'
             ]:
-                if price_selector:
-                    price_text = price_selector.text.strip()
-                    price_match = re.search(r'\d+', price_text.replace(',', ''))
-                    if price_match:
-                        price = price_match.group()
-                        break
+                try:
+                    price_elem = item.select_one(price_selector)
+                    if price_elem:
+                        price_text = price_elem.get_text(strip=True)
+                        price_match = re.search(r'\d+', price_text.replace(',', ''))
+                        if price_match:
+                            price = price_match.group()
+                            break
+                except:
+                    continue
             tour['价格'] = price
             
             # 天数
             days = 'N/A'
-            for days_selector in [
-                item.find('span', class_=lambda x: x and 'days' in x),
-                item.find('span', class_=lambda x: x and 'day' in x),
-                item.find('span', string=lambda s: s and '天' in s),
-            ]:
-                if days_selector:
-                    days_text = days_selector.text.strip()
-                    days_match = re.search(r'(\d+)\s*天', days_text)
-                    if days_match:
-                        days = days_match.group(1)
-                        break
+            for days_selector in ['[class*="day"]', '[class*="duration"]', 'span']:
+                try:
+                    days_elem = item.select_one(days_selector)
+                    if days_elem:
+                        days_text = days_elem.get_text(strip=True)
+                        days_match = re.search(r'(\d+)\s*天', days_text)
+                        if days_match:
+                            days = days_match.group(1)
+                            break
+                except:
+                    continue
             tour['天数'] = days
             
             # 出发地
-            tour['出发地'] = '多城市'  # 默认值
+            tour['出发地'] = '武汉'
             
             # 目的地
             tour['目的地'] = self.destination
             
-            # 评分
+            # 评分 - 从星星或数字查找
             score = 'N/A'
-            for score_selector in [
-                item.find('span', class_=lambda x: x and 'score' in x),
-                item.find('span', class_=lambda x: x and 'rating' in x),
-            ]:
-                if score_selector:
-                    score = score_selector.text.strip()
-                    break
+            for score_selector in ['[class*="score"]', '[class*="rating"]', '[class*="star"]']:
+                try:
+                    score_elem = item.select_one(score_selector)
+                    if score_elem:
+                        score_text = score_elem.get_text(strip=True)
+                        score = score_text[:5]  # 取前5个字符
+                        break
+                except:
+                    continue
             tour['评分'] = score
             
             # 评价数
             review_count = '0'
-            for review_selector in [
-                item.find('span', class_=lambda x: x and 'review' in x),
-                item.find('span', class_=lambda x: x and 'comment' in x),
-                item.find('span', string=lambda s: s and '人' in s),
-            ]:
-                if review_selector:
-                    review_text = review_selector.text.strip()
-                    review_match = re.search(r'(\d+)', review_text)
-                    if review_match:
-                        review_count = review_match.group(1)
-                        break
+            text_content = item.get_text()
+            review_match = re.search(r'(\d+)\s*(?:条|个)?(?:评|点评|评价)', text_content)
+            if review_match:
+                review_count = review_match.group(1)
             tour['评价数'] = review_count
             
-            # 关键词/特色 - 从产品名称中提取
+            # 关键词/特色
             tour['关键词'] = self._extract_keywords(tour['产品名称'])
             
             return tour
@@ -297,26 +308,22 @@ class CtripTourCrawler:
         """从标题中提取关键词"""
         keywords = set()
         
-        # 定义关键词映射
         keyword_map = {
             '温泉': ['温泉'],
             '漂流': ['漂流'],
             '自驾': ['自驾'],
             '跟团': ['跟团', '团队'],
-            '蜜月': ['蜜月', '蜜月游'],
+            '蜜月': ['蜜月'],
             '亲子': ['亲子', '亲子游'],
             '爸妈': ['爸妈', '父母'],
-            '山水': ['山水', '名山', '大山'],
+            '山水': ['山水', '名山'],
             '古镇': ['古镇', '水乡'],
-            '海滨': ['海滨', '海边', '海岛', '沙滩'],
+            '海滨': ['海滨', '海边', '海岛'],
             '高铁': ['高铁'],
-            '飞机': ['飞机'],
-            '自由行': ['自由行', '自助游'],
+            '飞机': ['飞机', '航班'],
+            '自由行': ['自由行', '自助'],
             '周末': ['周末'],
-            '短途': ['短途'],
-            '长线': ['长线'],
             '国际': ['国际', '出国'],
-            '港澳': ['港澳', '香港', '澳门'],
         }
         
         title_lower = title.lower()
@@ -334,7 +341,8 @@ class CtripTourCrawler:
         """验证旅游产品数据"""
         required_fields = ['产品名称', '目的地']
         for field in required_fields:
-            if not tour.get(field) or tour.get(field) == 'N/A':
+            value = tour.get(field)
+            if not value or value == 'N/A' or len(str(value).strip()) == 0:
                 return False
         return True
     
@@ -374,10 +382,6 @@ class CtripTourCrawler:
                     cell.value = value
                     cell.border = thin_border
                     cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-                    
-                    # 价格列居右对齐
-                    if col_name == '价格':
-                        cell.alignment = Alignment(horizontal="right", vertical="center")
             
             # 调整列宽
             column_widths = {
